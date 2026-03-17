@@ -1,0 +1,46 @@
+[tools]
+python = "3.12"
+
+[env]
+# Default port for the emulator server
+IBMCLOUD_LOCAL_PORT = "4515"
+# Default host binding
+IBMCLOUD_LOCAL_HOST = "0.0.0.0"
+# Enable the routing dashboard
+IBMCLOUD_LOCAL_DASHBOARD = "true"
+# Persistence mode: "memory" or "disk"
+IBMCLOUD_LOCAL_PERSISTENCE = "memory"
+# Log level
+IBMCLOUD_LOCAL_LOG_LEVEL = "info"
+
+[tasks.install]
+description = "Install project dependencies"
+run = "uv pip install -e '.[dev]'"
+
+[tasks.dev]
+description = "Start the emulator in development mode with auto-reload"
+run = "uvicorn src.server:app --host $IBMCLOUD_LOCAL_HOST --port $IBMCLOUD_LOCAL_PORT --reload"
+
+[tasks.start]
+description = "Start the emulator server"
+run = "python -m cli.ibmcloud_local start"
+
+[tasks.stop]
+description = "Stop the emulator server"
+run = "python -m cli.ibmcloud_local stop"
+
+[tasks.reset]
+description = "Reset all emulator state"
+run = "python -m cli.ibmcloud_local reset"
+
+[tasks.routes]
+description = "Print all registered API routes"
+run = "python -m cli.ibmcloud_local routes"
+
+[tasks.test]
+description = "Run the test suite"
+run = "pytest tests/ -v"
+
+[tasks.lint]
+description = "Lint the codebase"
+run = "ruff check src/ cli/ tests/"
