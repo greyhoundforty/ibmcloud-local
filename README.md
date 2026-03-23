@@ -208,6 +208,48 @@ This lets a team share one emulator instance where each member's real IBM Cloud 
 | Public Gateways | list, create, get, update, delete |
 | Load Balancers | list, create, get, update, delete; listeners, pools, members |
 
+### Transit Gateway (`/v1/`)
+
+| Resource | Endpoints |
+|---|---|
+| Transit Gateways | list, create, get, update, delete |
+| Connections | list per gateway, create (VPC + PowerVS), get, delete |
+| Global connections | list all connections across all gateways (`/v1/connections`) |
+
+All Transit Gateway endpoints require a `?version=YYYY-MM-DD` query parameter.
+
+Supported connection `network_type` values: `vpc`, `power_virtual_server`.
+
+**Python SDK example:**
+
+```python
+from ibm_cloud_networking_services import TransitGatewayApisV1
+from ibm_cloud_sdk_core.authenticators import IAMAuthenticator
+
+auth = IAMAuthenticator(
+    apikey="any-string-works",
+    url="http://localhost:4515",
+    disable_ssl_verification=True,
+)
+tgw = TransitGatewayApisV1(authenticator=auth, version="2024-01-01")
+tgw.set_service_url("http://localhost:4515/v1")
+
+# Create a global routing transit gateway
+gateway = tgw.create_transit_gateway(
+    location="us-south",
+    name="tgw-dev",
+    **{"global": True},
+).get_result()
+
+# Attach a VPC
+tgw.create_transit_gateway_connection(
+    transit_gateway_id=gateway["id"],
+    network_type="vpc",
+    network_id="crn:v1:bluemix:public:is:us-south:a/abc::vpc:r006-...",
+    name="conn-my-vpc",
+).get_result()
+```
+
 ### Resource Manager (`/v2/`)
 
 | Resource | Endpoints |
@@ -301,11 +343,13 @@ src/
     public_gateway.py   Public Gateways
     load_balancer.py    Load Balancers (listeners, pools, members)
     resource_manager.py Resource Groups
+    transit_gateway.py  Transit Gateways and connections
   models/
     vpc.py              Pydantic models for VPC resources
     network_acl.py
     public_gateway.py
     load_balancer.py
+    transit_gateway.py
   iam/
     policy_store.py     Loads and queries IBM Cloud IAM policy JSON
     vpc_action_map.py   Maps HTTP method + URL path to IAM action strings

@@ -1,5 +1,241 @@
 # ibmcloud-local — Development Status
 
+## Session summary (2026-03-20)
+
+### Goal
+
+Extend the emulator's JWT payload to fix an IBM Terraform provider panic, determine the correct provider version and endpoint configuration for local testing, and establish the boundaries of what "bluestack" can support today.
+
+---
+
+### What worked
+
+#### JWT `id` claim fix
+
+The IBM Terraform provider panics at `fetchUserDetails` in `config.go:4117` because it does a hard type-assertion on `claims["id"]`:
+
+```go
+user.UserID = claims["id"].(string)       // line 4117 — panics if nil
+user.UserAccount = claims["account"]["bss"].(string)  // line 4118
+```
+
+The `account.bss` claim was already present from the previous session. Adding the `id` claim resolved the panic:
+
+```python
+# src/providers/iam.py — _issue_local_jwt()
+"id": iam_id,   # IBM Terraform provider fetchUserDetails reads claims["id"]
+```
+
+All 35 IAM tests continue to pass after the change.
+
+#### Provider version pinning to 1.79.0
+
+IBM Terraform provider versions >= ~1.82 introduced a paired `RequiredWith` schema constraint:
+
+- `iam_profile_name` requires `ibmcloud_account_id`
+- `ibmcloud_account_id` requires `iam_profile_name`
+
+This constraint fires at `PrepareProviderConfig` (schema validation, before `ConfigureFunc`) regardless of whether either attribute is set in the provider block or in environment variables. There is no documented workaround. Provider version `1.79.0` predates this constraint and works cleanly with just `ibmcloud_api_key` + `region`.
+
+#### VPC endpoint environment variable
+
+Version 1.79.0 reads the VPC/IS endpoint from `RIAAS_ENDPOINT`, not `IBMCLOUD_IS_NG_API_ENDPOINT` (which was introduced in a later release). The `bluestack-env.sh` helper now exports both:
+
+```bash
+export RIAAS_ENDPOINT="${BLUESTACK_URL}/v1"
+export IBMCLOUD_IS_NG_API_ENDPOINT="${BLUESTACK_URL}/v1"
+```
+
+This makes the script forward-compatible if the provider version is later bumped.
+
+#### Endpoint variable audit (v1.79.0)
+
+| Service | Env var (v1.79.0) | Value |
+|---|---|---|
+| IAM | `IBMCLOUD_IAM_API_ENDPOINT` | `http://localhost:4515` |
+| VPC | `RIAAS_ENDPOINT` | `http://localhost:4515/v1` |
+| Transit Gateway | `IBMCLOUD_TG_API_ENDPOINT` | `http://localhost:4515/v1` |
+
+#### IC_IAM_TOKEN removed from bluestack-env.sh
+
+Pre-fetching a token and exporting it as `IC_IAM_TOKEN` triggers a different provider auth code path in v1.79.0 that expects a paired `iam_refresh_token`. Removing it and letting the provider authenticate via `ibmcloud_api_key` against `IBMCLOUD_IAM_API_ENDPOINT` is both simpler and more correct.
+
+#### terraform plan partially succeeded
+
+With the above fixes in place, `terraform plan` progressed further than ever:
+- IAM auth succeeded (provider parsed the JWT without panic)
+- `ibm_tg_gateway` was fully planned (Transit Gateway endpoint works end-to-end)
+- `ibm_tg_connection` resources were planned correctly
+
+---
+
+### What did not work
+
+#### `ibm_is_vpc` CustomizeDiff token error
+
+After planning Transit Gateway resources successfully, the provider calls `CustomizeDiff` for `ibm_is_vpc` (from the `terraform-ibm-modules/vpc` module). This hook makes a live API call — likely to validate instance profiles or image availability — and returns:
+
+```
+Your authentication token is not valid
+severity: error
+resource: ibm_is_vpc
+operation: CustomizeDiff
+```
+
+Root cause is not fully isolated. Candidates:
+1. `CustomizeDiff` calls an endpoint the emulator does not implement (e.g. `GET /v1/instance/profiles`, `GET /v1/images`, or `GET /v1/regions`)
+2. The token is reaching the emulator but the middleware rejects it for a reason not yet traced
+3. The VPC module's `CustomizeDiff` may call a global IBM Cloud catalog endpoint that cannot be redirected
+
+**Status: blocked.** The Terraform path is set aside for now. curl and the Python SDK work correctly and are the recommended interfaces for local testing.
+
+---
+
+### Current interface recommendations
+
+| Interface | Status | Notes |
+|---|---|---|
+| Python SDK (`ibm-vpc`, `ibm-cloud-networking-services`) | Working | Set `set_service_url("http://localhost:4515/v1")` |
+| curl | Working | See README quick-start |
+| Terraform (TGW resources) | Partially working | Plan succeeds, apply not tested |
+| Terraform (VPC module) | Blocked | `CustomizeDiff` token error |
+
+---
+
+### Next steps: VPC endpoint gaps
+
+The VPC provider currently implements: VPCs, Subnets, Instances, Security Groups, Floating IPs, Network ACLs, Public Gateways, and Load Balancers.
+
+The following are missing and needed to support realistic Terraform and SDK workflows:
+
+#### High priority (block common workflows)
+
+| Endpoint group | Why needed |
+|---|---|
+| `GET /v1/instance/profiles` | Required by Terraform `ibm_is_instance` validation and `ibm_is_vpc` CustomizeDiff; blocks `terraform plan` |
+| `GET /v1/images` / `GET /v1/images/{id}` | Instance creation references an image by ID; SDK callers look up images before creating VSIs |
+| `GET /v1/regions` / `GET /v1/regions/{name}/zones` | Provider validates region/zone at plan time; also needed by the VPC module |
+| `GET /v1/keys` / `POST /v1/keys` | SSH key management; `InstanceCreate` currently ignores the `keys` field entirely |
+
+#### Medium priority (extend existing resources)
+
+| Endpoint group | Why needed |
+|---|---|
+| `GET /v1/volumes` / `POST /v1/volumes` | Block storage; `InstanceCreate` ignores `boot_volume_attachment` |
+| `GET /v1/instances/{id}/volume_attachments` | Attach/detach volumes to instances |
+| `GET /v1/instances/{id}/network_interfaces` | Multi-NIC instances; floating IP attachment to specific interfaces |
+| `POST /v1/instances/{id}/actions` | Start/stop/reboot already exist but are not wired to the VPC module's expected action format |
+| `GET /v1/subnets/{id}/reserved_ips` | Subnet IP tracking; some SDK calls enumerate reserved IPs |
+
+#### Lower priority (completeness)
+
+| Endpoint group | Notes |
+|---|---|
+| `GET /v1/snapshots` | Volume snapshots |
+| `GET /v1/vpn_gateways` | VPN connectivity |
+| `GET /v1/endpoint_gateways` | VPE (Virtual Private Endpoint) |
+| `GET /v1/flow_log_collectors` | Flow log configuration |
+| `GET /v1/instance/templates` | Instance templates / auto-scale groups |
+| `GET /v1/placement_groups` | Placement group constraints |
+| `GET /v1/dedicated_hosts` | Dedicated host management |
+| `GET /v1/bare_metal_servers` | Bare metal (optional — complex) |
+
+#### Pagination (cross-cutting)
+
+All list endpoints currently return every resource in a single response. The real IBM Cloud API uses cursor-based pagination:
+
+```json
+{
+  "limit": 50,
+  "next": { "href": "...", "start": "<cursor>" },
+  "resources": [...]
+}
+```
+
+SDKs that call `list_all_*` (auto-paginating wrappers) will misbehave without this. A single pagination middleware or helper on `StateStore` would address all list endpoints at once.
+
+---
+
+### Suggested implementation order
+
+1. **Static catalog endpoints** — `GET /v1/instance/profiles`, `GET /v1/regions`, `GET /v1/regions/{name}/zones`, `GET /v1/images` — these return fixed data and unblock Terraform `CustomizeDiff`
+2. **SSH Keys** — straightforward CRUD, unblocks instance creation with key injection
+3. **Volumes + volume attachments** — extend instance model to accept `boot_volume_attachment`
+4. **Pagination** — implement once across all list endpoints
+5. **Network interfaces** — extend instance response, wire floating IP attachment
+
+---
+
+## Session summary (2026-03-17)
+
+### What was built
+
+#### Transit Gateway provider (Red/Green complete)
+
+New provider emulating the IBM Cloud Transit Gateway API (`https://transit.cloud.ibm.com/v1`).
+
+**New files:**
+
+| File | Purpose |
+|---|---|
+| `src/models/transit_gateway.py` | Pydantic models — `TransitGatewayCreate`, `TransitGatewayUpdate`, `TransitGatewayConnectionCreate`, response types |
+| `src/providers/transit_gateway.py` | `TransitGatewayProvider` — 10 endpoints |
+| `tests/test_transit_gateway_api.py` | 35 tests, all passing |
+
+**Endpoints:**
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/v1/transit_gateways` | List all |
+| POST | `/v1/transit_gateways` | Create; 409 on duplicate name |
+| GET | `/v1/transit_gateways/{id}` | Get; includes live `connection_count` |
+| PATCH | `/v1/transit_gateways/{id}` | Rename / toggle global routing |
+| DELETE | `/v1/transit_gateways/{id}` | 409 if connections still attached |
+| GET | `/v1/transit_gateways/{id}/connections` | List connections for one gateway |
+| POST | `/v1/transit_gateways/{id}/connections` | VPC and PowerVS types; 409 on duplicate `network_id` |
+| GET | `/v1/transit_gateways/{id}/connections/{conn_id}` | Get one connection |
+| DELETE | `/v1/transit_gateways/{id}/connections/{conn_id}` | Detach |
+| GET | `/v1/connections` | Global — all connections across all gateways, each with nested `transit_gateway` reference |
+
+All endpoints require `?version=YYYY-MM-DD` query parameter, matching the real IBM Cloud API contract.
+
+**Notable behaviours:**
+- `global` JSON key is aliased via `Field(alias="global")` to work around Python's reserved keyword.
+- Connections are stored in per-gateway namespaces (`tgw_connections_{id}`) for clean isolation.
+- Deleting a gateway with active connections returns 409 — connections must be removed first.
+- Duplicate `network_id` within the same gateway returns 409 (prevents attaching the same VPC/workspace twice).
+- The global `/v1/connections` endpoint aggregates across all gateways and injects a `transit_gateway` reference on each entry, matching the real API shape.
+- Supported `network_type` values: `vpc`, `power_virtual_server` (others accepted but not validated).
+
+#### SDK URL fix
+
+The IBM Cloud VPC Python SDK sets `DEFAULT_SERVICE_URL = 'https://us-south.iaas.cloud.ibm.com/v1'` and appends resource paths (e.g. `/vpcs`) relative to that base. `set_service_url("http://localhost:4515")` therefore sends requests to `http://localhost:4515/vpcs` (404), not `/v1/vpcs`.
+
+Correct usage:
+```python
+svc.set_service_url("http://localhost:4515/v1")   # include /v1
+```
+
+The README and environment variable examples were updated accordingly (`IBMCLOUD_VPC_URL=http://localhost:4515/v1`).
+
+#### GitHub Actions CI
+
+`.github/workflows/ci.yml` added with two jobs:
+- **Lint** — `ruff check src/ cli/ tests/` on Python 3.12
+- **Test** — `pytest tests/ -v --tb=short` on Python 3.11 and 3.12 in parallel
+
+`FORCE_JAVASCRIPT_ACTIONS_TO_NODE24=true` set at workflow level to silence Node.js 20 deprecation warnings ahead of the June 2026 forced cutover.
+
+#### Architecture fix: route registration at module level
+
+Providers are now instantiated and `app.include_router()` called at `server.py` module import time, not inside the `lifespan` handler. This prevents duplicate route accumulation when `TestClient(app)` is constructed multiple times across the test suite.
+
+---
+
+Total test count after this session: **290 tests, all passing**.
+
+---
+
 ## Session summary (2026-03-16)
 
 ### What was built

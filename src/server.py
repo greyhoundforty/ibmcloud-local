@@ -45,6 +45,7 @@ from src.providers.load_balancer import LoadBalancerProvider
 from src.providers.network_acl import NetworkAclProvider
 from src.providers.public_gateway import PublicGatewayProvider
 from src.providers.resource_manager import ResourceManagerProvider, ensure_default_resource_group
+from src.providers.transit_gateway import TransitGatewayProvider
 from src.providers.vpc import VpcProvider
 from src.routing import registry
 from src.state.store import store
@@ -65,6 +66,7 @@ _providers = [
     NetworkAclProvider(),
     PublicGatewayProvider(),
     LoadBalancerProvider(),
+    TransitGatewayProvider(),
     # Future providers go here:
     # CosProvider(),
     # PowerVsProvider(),

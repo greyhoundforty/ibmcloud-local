@@ -44,3 +44,9 @@ run = "pytest tests/ -v"
 [tasks.lint]
 description = "Lint the codebase"
 run = "ruff check src/ cli/ tests/"
+
+[hooks]
+enter = """
+echo 'Session notes: docs/development-status.md'
+echo 'claude --resume 50d52788-198d-43e3-aa95-52d87a81180b'
+"""

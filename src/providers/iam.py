@@ -79,6 +79,7 @@ class IamProvider(BaseProvider):
         payload = {
             "iss": f"{self.api_base_url}/identity",
             "sub": iam_id,
+            "id": iam_id,  # fetchUserDetails reads claims["id"] for UserID
             "iam_id": iam_id,
             "iam_apikey_id": apikey_id,
             "realmid": "iam",
@@ -86,6 +87,11 @@ class IamProvider(BaseProvider):
             "client_id": "bx",
             "iat": now,
             "exp": exp,
+            # fetchUserDetails also reads claims["account"]["bss"] for UserAccount.
+            "account": {
+                "valid": True,
+                "bss": "local-emulator-account",
+            },
         }
         token = jwt.encode(
             payload,
